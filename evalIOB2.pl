@@ -2,214 +2,298 @@
 require 5.000;
 
 use Getopt::Std;
-getopts('ha:r:l:e');
+getopts('ha:t:');
 
-$afield = -1;
-$rfield = -1;
+$SS_INIT = "~$~";
+$SS_WILD = "~*~";
 
-@objs=("protein", "DNA", "RNA", "cell_type", "cell_line");
-$alls="[-ALL-]";
-
-if (($opt_h) || ($#ARGV != 1)) {
-    die "\n" .
-	"[evalIOB2] 2004.10.14 Jin-Dong Kim (jdkim\@is.s.u-tokyo.ac.jp)\n" .
-	"\n" .
-	"<DESCRIPTION>\n" .
-	"\n" .
-	"It evaluates the performance of object identification in terms of precision and recall. " .
-	"This is done by comparing the answer file to the reference file which is assumed to have the correct answer. " .
-	"It assumes the object identification is encoded in IOB2 tagging scheme.\n" .
-	"\n" .
-	"<USAGE>\n" .
-	"\n" .
-	"evalIOB2.pl answer_file reference_file\n" .
-	"\n" .
-	"<OPTIONS>\n" .
-	"\n" .
-	"-h               displays this instructions.\n" .
-	"-a answer_field  specifies the field of IOB-tags in the answer_file.\n" .
-	"                 It is 0-oriented and defaulted to -1 (the last field).\n" . 
-	"-r refer_field   specifies the field of IOB-tags in the reference_file.\n" .
-	"                 It is 0-oriented and defaulted to -1 (the last field).\n" . 
-	"-l list_file     specifies the file containing a list of UIDs.\n" .
-	"                 Only the abstracts of the UIDs will be evaluated.\n" .
-	"                 If omitted, all the abstracts will be evaluated.\n" .
-	"\n";
+if (($opt_h) || ($#ARGV == -1)) {
+    die "\n[evalIOB2] 2004.4.2 Jin-Dong Kim (mail\@jdkim.net)\n" .
+	"\n<DESCRIPTION>\n" .
+	"\nIt evaluates the performance of object identification in terms of precision and recall." .
+	"\nIt assumes the object identification is encoded in the IOB2 tagging scheme.\n" .
+	"\n<USAGE>\n" .
+	"\nevalIOB2.pl [-h] [-r ref_field] [-a answer_field] ref_file [answer_file]\n" .
+	"\n<OPTIONS>\n" .
+	"\n-h               shows this instructions.\n" .
+	"\n-r ref_field     specifies the location of the reference field in the reference file." .
+	"\n                 It is 0-oriented and the default is -1 (the last field)," .
+	"\n                 or -2 (the second to last field) when the answer file is not specified.\n" .
+	"\n-a answer_field  specifies the location of the answer field in the answer file" .
+	"\n                 or in the reference file when the answer file is not specified." .
+	"\n                 the default is -1 in any case.\n\n";
 } # if
 
-if (defined($opt_a)) {$afield = $opt_a}
+if ($#ARGV == 1) {
+    open (RFILE, $ARGV[0]) or die "can't open [$ARGV[0]].\n";
+    open (AFILE, $ARGV[1]) or die "can't open [$ARGV[1]].\n";
+    $rfield = $afield = -1;
+} # if
+
+elsif ($#ARGV == 0) {
+    open (RFILE, $ARGV[0]) or die "can't open [$ARGV[0]].\n";
+    open (AFILE, $ARGV[0]) or die "can't open [$ARGV[0]].\n";
+    $rfield = -2;
+    $afield = -1;
+} # elsif
+
 if (defined($opt_r)) {$rfield = $opt_r}
+if (defined($opt_a)) {$afield = $opt_a}
+if (defined($opt_l)) {$lfield = $opt_l}
 
-open (AFILE, $ARGV[0]) or die "can't open [$ARGV[0]].\n";
-open (RFILE, $ARGV[1]) or die "can't open [$ARGV[1]].\n";
+$numtag=$numctag=$numbtag=0;
+$numans=$numref=$numcrt=$numleft=$numright=0;
+$numbcrt=$numbleft=$numbright=0;
 
-if ($opt_l) {
-    open (LFILE, $opt_l) or die "can't open [$opt_l].\n";
-    while (<LFILE>) {chomp; $abstogo{$_} = 1}
-} # if
-if (defined($opt_e)) {open (EFILE, ">" . $ARGV[0] . ".chk") or die "can't open [$ARGV[0].chk].\n"}
+while (@ablock=&read_block(\*AFILE)) {
 
+    @tags = ();
+    foreach $token (@ablock) {push(@tags, ${$token}[$afield])}
+    @ntags = &iob2_iobes(@tags);
+    for ($i=0; $i<=$#ntags; $i++) {${$ablock[$i]}[$afield] = $ntags[$i]}
 
-push @objs, $alls;
-foreach $obj (@objs) {$nref{$obj} = $nans{$obj} = $nfcrt{$obj} = $nlcrt{$obj} = $nrcrt{$obj} = 0;}
-pop @objs;
-@rwrds = @rtags = @atags = @chks = ();
-$linenum = 0;
+    @rblock=&read_block(\*RFILE);
 
-while ($rline = <RFILE>) {
-    chomp $rline;
+    if ($#ablock != $#rblock) {die "the number of tokens in a sentence is different.\n"}
 
-    if ($aline = <AFILE>) {chomp $aline}
-    else {die "insufficient answers.\n"}
-    $linenum++;
+    @tags = ();
+    foreach $token (@rblock) {push(@tags, ${$token}[$rfield])}
+    @ntags = &iob2_iobes(@tags);
+    for ($i=0; $i<=$#ntags; $i++) {${$rblock[$i]}[$rfield] = $ntags[$i]}
 
-    if ($rline eq "") {
-	if ($aline ne "") {die "sentence alignment error at line $linenum.\n"}
+    $match=0; $bmatch=0;
+    for ($i=0; $i<=$#ablock; $i++) {
 
-	if ((!$opt_l) || ($abstogo{$medid})) {
-	    @rtags = iob2_iobes(@rtags);
-	    @atags = iob2_iobes(@atags);
+	$atag = ${$ablock[$i]}[$afield];
+	$aiob = substr($atag, 0, 1);
+	if (substr($atag, 1, 1) eq "-") {$acls = substr($atag, 2)}
+	else {$acls = ""}
 
-	    $match = 0;
-	    for ($i=0; $i<=$#rtags; $i++) {
+	$rtag = ${$rblock[$i]}[$rfield];
+	$riob = substr($rtag, 0, 1);
+	if (substr($rtag, 1, 1) eq "-") {$rcls = substr($rtag, 2)}
+	else {$rcls = ""}
 
-		$rtag = $rtags[$i]; $riob = substr($rtag, 0, 1);
-		if (substr($rtag, 1, 1) eq "-") {$rcls = substr($rtag, 2)}
-		else {$rcls = ""}
+	$numtag++;
+	if ($aiob eq $riob) {$numbtag++}
+	if ($atag eq $rtag) {$numctag++}
 
-		$atag = $atags[$i]; $aiob = substr($atag, 0, 1);
-		if (substr($atag, 1, 1) eq "-") {$acls = substr($atag, 2)}
-		else {$acls = ""}
-
-		if ($rtag eq $atag) {$chks[$i] = ">>>>>TRUE"}
-		else {
-		    $chks[$i] = ">>>>>FALSE";
-
-		    if ($atag ne "O") {
-			if ($rtag eq "O") {$chks[$i] .= "+"}
-			elsif ($rtag ne $atag) {$chks[$i] .= "^"}
-			else {$chks[$i] .= "@"}
-		    } # if
-		} # if
-
-		#####
-		# object evaluation
-		#####
-		if (($riob eq "S") || ($riob eq "B")) {$nref{$rcls}++;}
-		if (($aiob eq "S") || ($aiob eq "B")) {$nans{$acls}++}
-
-		if ($acls eq $rcls) {
-		    if (($aiob eq "S") && ($riob eq "S")) {$nfcrt{$rcls}++; $nlcrt{$rcls}++; $nrcrt{$rcls}++;}
-		    if (($aiob eq "S") && ($riob eq "E")) {$nrcrt{$rcls}++}
-		    if (($aiob eq "E") && ($riob eq "S")) {$nrcrt{$rcls}++}
-		    if (($aiob eq "S") && ($riob eq "B")) {$nlcrt{$rcls}++}
-		    if (($aiob eq "B") && ($riob eq "S")) {$nlcrt{$rcls}++}
-		    if (($aiob eq "B") && ($riob eq "B")) {$nlcrt{$rcls}++; $match = 1;}
-		    if (($aiob eq "E") && ($riob eq "E")) {$nrcrt{$rcls}++; if ($match) {$nfcrt{$rcls}++;}}
-		} # if
-
-		if (($atag ne $rtag) || (($aiob ne "B") && ($aiob ne "I"))) {$match = 0}
-
-	    } # for ($i)
-
-	    if (defined($opt_e)) {
-		for ($i=0; $i<=$#rtags; $i++) {
-		    print EFILE join ("\t", $rwrds[$i], $rtags[$i], $atags[$i], $chks[$i]), "\n";
-		} # for
-		print EFILE "\n";
+	if (($riob eq "S") || ($riob eq "B")) {
+	    if (defined($lfield)) {
+		@lexs = split ' ', ${$rblock[$i]}[$lfield];
+		$numlexs = $#lexs+1;
 	    } # if
+	    else {
+		$numlexs = 1;
+	    } # else
+	    &cntref;
 	} # if
-	@rwrds = @rtags = @atags = @chks = ();
-    } # if
 
-    elsif (substr($rline, 0, 11) eq "###MEDLINE:") {
-	print EFILE $rline, "\n\n";
+	if (($aiob eq "S") || ($aiob eq "B")) {&cntans("numans")}
 
-	$medid = substr($rline, 11);
+	if (($aiob eq "S") && ($riob eq "S")) {
+	    &cntans("numbcrt"); &cntans("numbleft"); &cntans("numbright");
+	    if ($acls eq $rcls) {&cntans("numcrt"); &cntans("numleft"); &cntans("numright")}
+	} # if
 
-	if ($rline = <RFILE>) {chomp $rline}
-	else {die "suspicious error at the end of the reference file.\n"}
+	if (($aiob eq "S") && ($riob eq "E")) {
+	    &cntans("numbright");
+	    if ($acls eq $rcls) {&cntans("numright")}
+	} # if
 
-	if ($aline = <AFILE>) {chomp $aline}
-	else {die "suspicious error at the end of the answer file.\n"}
-	$linenum++;
+	if (($aiob eq "S") && ($riob eq "B")) {
+	    &cntans("numbleft");
+	    if ($acls eq $rcls) {&cntans("numleft")}
+	} # if
 
-	if (($rline ne "")||($aline ne "")) {die "format mismatch error at the line $linenum.\n"}
-    } # if
- 
+	if (($aiob eq "B") && ($riob eq "S")) {
+	    &cntans("numbleft");
+	    if ($acls eq $rcls) {&cntans("numleft")}
+	} # if
 
-    else {
-	@rvals = split(/\t/, $rline);
-	push @rwrds, $rvals[$wfield];
-	push @rtags, $rvals[$rfield];
+	if (($aiob eq "B") && ($riob eq "B")) {
+	    &cntans("numbleft"); $bmatch = 1;
+	    if ($acls eq $rcls) {&cntans("numleft"); $match = 1}
+	} # if
 
-	@avals = split(/\t/, $aline);
-	push @atags, $avals[$afield];
-    } # else
+
+	if ($aiob ne $riob) {$bmatch=0}
+	if ($atag ne $rtag) {$match=0}
+
+
+	if (($aiob eq "O") || ($riob eq "O")) {$match=0; $bmatch=0}
+
+	if (($aiob eq "E") && ($riob eq "S")) {
+	    &cntans("numbright");
+	    if ($acls eq $rcls) {&cntans("numright")}
+	} # if
+
+
+	if (($aiob eq "E") && ($riob eq "E")) {
+	    if ($bmatch) {&cntans("numbcrt")}
+	    &cntans("numbright");
+	    if ($acls eq $rcls) {if ($match) {&cntans("numcrt")}; &cntans("numright");}
+	} # if
+
+    } # for ($i)
+
 } # while
 
+print "\n[Tagging Performance]\n";
+print "# of tags: $numtag,\t correct tags: $numctag,\t correct IOBs: $numbtag\n";
+printf ("precision with class info: %6.4f,\t w/o class info: %6.4f\n", $numctag/$numtag, $numbtag/$numtag);
 
-foreach $obj (@objs) {
-    $nref{$alls}+=$nref{$obj}; $nans{$alls}+=$nans{$obj};
-    $nfcrt{$alls}+=$nfcrt{$obj}; $nlcrt{$alls}+=$nlcrt{$obj}; $nrcrt{$alls}+=$nrcrt{$obj};
+print "\n[Object Identification Performance]\n";
+print "# of OBJECTs: $numref,\t ANSWERs: $numans.\n";
+print "\n# (recall / precision / f-score) of ...\n";
+
+if ($numref == 0) {die "[!]No object to identify.\n"}
+if ($numans == 0) {die "[!]No object identified.\n"}
+
+$recall=$numcrt/$numref;
+$precision=$numcrt/$numans;
+if ($precision+$recall==0) {$fscore = 0} else {$fscore=2*$precision*$recall/($precision+$recall)}
+printf ("     FULLY CORRECT answer with class info: $numcrt (%6.4f / %6.4f / %6.4f),\n", $recall, $precision, $fscore);
+
+$recall=$numbcrt/$numref;
+$precision=$numbcrt/$numans;
+if ($precision+$recall==0) {$fscore = 0} else {$fscore=2*$precision*$recall/($precision+$recall)}
+#printf ("                           w/o class info: $numbcrt (%6.4f / %6.4f / %6.4f),\n", $recall, $precision, $fscore);
+
+$recall=$numleft/$numref;
+$precision=$numleft/$numans;
+if ($precision+$recall==0) {$fscore = 0} else {$fscore=2*$precision*$recall/($precision+$recall)}
+printf ("    correct LEFT boundary with class info: $numleft (%6.4f / %6.4f / %6.4f),\n", $recall, $precision, $fscore);
+
+$recall=$numbleft/$numref;
+$precision=$numbleft/$numans;
+if ($precision+$recall==0) {$fscore = 0} else {$fscore=2*$precision*$recall/($precision+$recall)}
+#printf ("                           w/o class info: $numbleft (%6.4f / %6.4f / %6.4f),\n", $recall, $precision, $fscore);
+
+$recall=$numright/$numref;
+$precision=$numright/$numans;
+if ($precision+$recall==0) {$fscore = 0} else {$fscore=2*$precision*$recall/($precision+$recall)}
+printf ("   correct RIGHT boundary with class info: $numright (%6.4f / %6.4f / %6.4f),\n", $recall, $precision, $fscore);
+
+$recall=$numbright/$numref;
+$precision=$numbright/$numans;
+if ($precision+$recall==0) {$fscore = 0} else {$fscore=2*$precision*$recall/($precision+$recall)}
+#printf ("                           w/o class info: $numbright (%6.4f / %6.4f / %6.4f).\n", $recall, $precision, $fscore);
+printf "\n";
+
+
+if (keys(%numref) > 1) {
+
+foreach $obj (keys(%numref)) {
+
+if (!defined($numans{$obj})) {$numans{$obj}=0}
+if (!defined($numcrt{$obj})) {$numcrt{$obj}=0}
+if (!defined($numbcrt{$obj})) {$numbcrt{$obj}=0}
+if (!defined($numleft{$obj})) {$numleft{$obj}=0}
+if (!defined($numbleft{$obj})) {$numbleft{$obj}=0}
+if (!defined($numright{$obj})) {$numright{$obj}=0}
+if (!defined($numbright{$obj})) {$numbright{$obj}=0}
+
+printf ("\n[<%s> Identification Performance]\n", $obj);
+print "# of OBJECTs: $numref{$obj},\t ANSWERs: $numans{$obj}.\n";
+print "\n# (recall / precision / f-score) of ...\n";
+
+if ($numref{$obj}==0) {$recall=0} else{$recall=$numcrt{$obj}/$numref{$obj}}
+if ($numans{$obj}==0) {$precision=0} else{$precision=$numcrt{$obj}/$numans{$obj}}
+if ($precision+$recall==0) {$fscore = 0} else {$fscore=2*$precision*$recall/($precision+$recall)}
+printf ("     FULLY CORRECT answer with class info: $numcrt{$obj} (%6.4f / %6.4f / %6.4f),\n", $recall, $precision, $fscore);
+
+#if ($numref{$obj}==0) {$recall=0} else{$recall=$numbcrt{$obj}/$numref{$obj}}
+#if ($numans{$obj}==0) {$precision=0} else{$precision=$numbcrt{$obj}/$numans{$obj}}
+#if ($precision+$recall==0) {$fscore = 0} else {$fscore=2*$precision*$recall/($precision+$recall)}
+#printf ("                           w/o class info: $numbcrt{$obj} (%6.4f / %6.4f / %6.4f),\n", $recall, $precision, $fscore);
+
+if ($numref{$obj}==0) {$recall=0} else{$recall=$numleft{$obj}/$numref{$obj}}
+if ($numans{$obj}==0) {$precision=0} else{$precision=$numleft{$obj}/$numans{$obj}}
+if ($precision+$recall==0) {$fscore = 0} else {$fscore=2*$precision*$recall/($precision+$recall)}
+printf ("    correct LEFT boundary with class info: $numleft{$obj} (%6.4f / %6.4f / %6.4f),\n", $recall, $precision, $fscore);
+
+#if ($numref{$obj}==0) {$recall=0} else{$recall=$numbleft{$obj}/$numref{$obj}}
+#if ($numans{$obj}==0) {$precision=0} else{$precision=$numbleft{$obj}/$numans{$obj}}
+#if ($precision+$recall==0) {$fscore = 0} else {$fscore=2*$precision*$recall/($precision+$recall)}
+#printf ("                           w/o class info: $numbleft{$obj} (%6.4f / %6.4f / %6.4f),\n", $recall, $precision, $fscore);
+
+if ($numref{$obj}==0) {$recall=0} else{$recall=$numright{$obj}/$numref{$obj}}
+if ($numans{$obj}==0) {$precision=0} else{$precision=$numright{$obj}/$numans{$obj}}
+if ($precision+$recall==0) {$fscore = 0} else {$fscore=2*$precision*$recall/($precision+$recall)}
+printf ("   correct RIGHT boundary with class info: $numright{$obj} (%6.4f / %6.4f / %6.4f),\n", $recall, $precision, $fscore);
+
+#if ($numref{$obj}==0) {$recall=0} else{$recall=$numbright{$obj}/$numref{$obj}}
+#if ($numans{$obj}==0) {$precision=0} else{$precision=$numbright{$obj}/$numans{$obj}}
+#if ($precision+$recall==0) {$fscore = 0} else {$fscore=2*$precision*$recall/($precision+$recall)}
+#printf ("                           w/o class info: $numbright{$obj} (%6.4f / %6.4f / %6.4f).\n", $recall, $precision, $fscore);
+printf "\n";
+
 } # foreach
 
-push @objs, $alls;
+} # if
+
+sub cntans {
+    my $cntname = shift(@_);
+    $$cntname += $numlexs;
+    if (defined($cntname->{$acls})) {$cntname->{$acls} += $numlexs}
+    else {$cntname->{$acls} = $numlexs}
+} # cntans
+
+sub cntref {
+    $numref += $numlexs;
+    if (defined($numref{$rcls})) {$numref{$rcls} += $numlexs}
+    else {$numref{$rcls} = $numlexs}
+} # cntref
+
+sub read_block {
+    my ($FILE) = shift;
+    my (@block);
+
+    while (<$FILE>) {
+	chomp;
+	if (blank_line($_)) {
+	    if (@block) {last;}
+	    else {next;}
+	} # if
+	push(@block, [split(/\t/, $_)]);
+    } # while
+
+    return @block;
+} # read_block
 
 
-#####
-# Performance Report: Total
-#####
-
-$title  = "                              Biomedical Entity Recognition Performance (Genaral)                                         \n";
-$legend = "                                                                                         number(recall/precision/f-score) \n";
-$border = "+------------------+---------------------------------+---------------------------------+---------------------------------+\n";
-$ctitle = "|                  |          complete match         |       right boundary match      |       left boundary match       |\n";
-
-format PERFROW =
-| @|||||||| (@###) | @|||||||||||||||||||||||||||||| | @|||||||||||||||||||||||||||||| | @|||||||||||||||||||||||||||||| |
-$obj, $nref{$obj}, &perfs($nref{$obj}, $nans{$obj}, $nfcrt{$obj}), &perfs($nref{$obj}, $nans{$obj}, $nrcrt{$obj}), &perfs($nref{$obj}, $nans{$obj}, $nlcrt{$obj})
-.
-
-print $title, $legend, $border, $ctitle, $border;
-$~ = "PERFROW";
-foreach $obj (@objs) {
-    write (STDOUT); print $border;
-} # foreach
-
-print "\n\n\n";
+sub blank_line {
+    my $line = shift(@_);
+    return (($line eq "") || ($line =~ /^\#\#\#MEDLIN/));
+} # blank_line
 
 
-sub perfs {
-    my ($numref, $numans, $numcrt) = @_;
-    if ($numref==0) {$recall=0} else {$recall=$numcrt/$numref}
-    if ($numans==0) {$precision=0} else {$precision=$numcrt/$numans}
-    if ($precision+$recall==0) {$fscore = 0} else {$fscore=2*$precision*$recall/($precision+$recall)}
-
-    $recall*=100; $precision*=100; $fscore*=100;
-    return sprintf("%4d (%5.2f\% / %5.2f\% / %5.2f\%)", $numcrt, $recall, $precision, $fscore);
-} # perfs
-
-
-sub iob2_iobes {
+sub iob2_iobes (@tags) {
     my (@tags) = @_;
-    my ($i);
+    my (@ntags, $i);
 
     for ($i=0; $i<=$#tags; $i++) {
+	$ntags[$i] = $tags[$i];
 
 	if (substr($tags[$i], 0, 1) eq "I") {
 
-	    if (($i==$#tags)||(substr($tags[$i+1], 0, 1) ne "I"))
-		{substr($tags[$i], 0, 1) = "E"}
+	    if (($i==$#tags)||($tags[$i+1] eq $SS_INIT)
+		||(substr($tags[$i+1], 0, 1) ne "I")) {substr($ntags[$i], 0, 1) = "E"}
+	    else {substr($ntags[$i], 0, 1) = "I"}
 
 	} elsif (substr($tags[$i], 0, 1) eq "B") {
 
-	    if (($i==$#tags)||(substr($tags[$i+1], 0, 1) ne "I"))
-		{substr($tags[$i], 0, 1) = "S"}
+	    if (($i==$#tags)||($tags[$i+1] eq $SS_INIT)
+		||(substr($tags[$i+1], 0, 1) ne "I")) {substr($ntags[$i], 0, 1) = "S"}
+	    else {substr($ntags[$i], 0, 1) = "B"}
 
-	} # elsif
+	} elsif (substr($tags[$i], 0, 1) eq "O") {
 
+	    substr($ntags[$i], 0, 1) = "O";
+
+	} # else
     } # for
 
-    return @tags;
+    return @ntags;
 } # iob2_iobes
